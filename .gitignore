@@ -1,0 +1,14 @@
+# 환경 변수 파일
+.env
+
+# Python 캐시 및 가상환경
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.env/
+.envrc
+.DS_Store
+
+# 기타
+*.log
