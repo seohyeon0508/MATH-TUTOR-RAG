@@ -14,10 +14,9 @@ INPUT_FILE_PATH = "/Users/Seohyeon/math-tutor-rag/data/processed_data.jsonl"
 
 DOMAIN_MAP = {
     "01": "수와 연산",
-    "02": "문자와 식",
-    "03": "함수",
-    "04": "기하",
-    "05": "확률과 통계"
+    "02": "변화와 관계",
+    "03": "도형과 측정",
+    "04": "자료와 가능성"
 }
 
 class Neo4jGraph:
