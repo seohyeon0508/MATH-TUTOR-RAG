@@ -13,6 +13,7 @@ from langchain_openai import ChatOpenAI
 from langchain_neo4j import Neo4jGraph
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
+from utils.student_profile import load_profile, save_profile
 
 load_dotenv()
 
@@ -29,21 +30,24 @@ graph = Neo4jGraph(url=NEO4J_URI, username=NEO4J_USER, password=NEO4J_PASSWORD)
 def extract_concept(user_question: str) -> str:
     prompt = ChatPromptTemplate.from_messages([
         ("system", """당신은 중학교 수학 질문 분석 전문가입니다.
-질문에서 학생이 궁금해하는 '핵심 수학 개념'을 하나만 추출하세요.
+질문에서 학생이 궁금해하는 '핵심 수학 개념'을 추출하세요.
 반드시 개념 이름만 반환하고, 다른 말은 절대 하지 마세요.
 
 규칙:
-1. 개념을 정확히 추출해야 합니다. (예: '각뿔대'를 '각뿔'로 추출하면 안 됩니다.)
+1. 개념을 *정확히* 추출해야 합니다. (예: '각뿔대'를 '각뿔'로 추출하면 안 됩니다.)
 2. 질문이 개념 그 자체인 경우, 해당 개념을 그대로 반환하세요.
+3. 두 개념의 '차이'나 '비교'를 묻는 경우, 'A와 B' 형식으로 두 개념을 모두 반환하세요.
+4. **(신규) '넓이', '부피', '구하는 법' 등 속성이나 방법을 묻는 경우, 이를 포함하여 추출하세요.**
 
 예시:
 질문: "일차방정식이 뭐야?" → 일차방정식
-질문: "계수를 어떻게 구해?" → 계수
+질문: "계수를 어떻게 구해?" → 계수 구하는 법
 질문: "정비례와 반비례 차이가 뭐야?" → 정비례와 반비례
 질문: "함수랑 방정식이랑 뭐가 달라?" → 함수와 방정식
 질문: "각뿔대가 뭐야?" → 각뿔대
 질문: "미적분이 뭐야?" → 미적분
-질문: "x가 뭐야?" → x
+질문: **"각뿔의 부피는 뭐야?" → 각뿔의 부피**
+질문: **"원기둥 넓이 어떻게 구해?" → 원기둥 넓이 구하는 법**
 
 개념을 찾을 수 없으면 "개념없음"이라고만 출력하세요.
 """),
@@ -73,6 +77,52 @@ def get_prerequisites(concept_name: str, depth: int = 2) -> list:
         print(f"⚠️ 그래프 탐색 오류: {e}")
         return []
 
+# 시각화를 위한 경로 탐색 (신규)
+def get_path_for_visualization(concept_name: str) -> dict:
+    """
+    시각화를 위해 특정 개념의 로컬 학습 경로(선수/후속)를 조회합니다.
+    (streamlit-agraph 형식에 맞는 노드와 엣지 반환)
+    """
+    query = """
+    MATCH (target:CoreConcept {name: $concept})
+    // 1. 선수 개념 (2단계 뒤까지)
+    OPTIONAL MATCH path_prereq = (prereq:CoreConcept)-[:IS_PREREQUISITE_OF*1..2]->(target)
+    // 2. 후속 개념 (1단계 앞까지)
+    OPTIONAL MATCH path_dep = (target)-[:IS_PREREQUISITE_OF*1..1]->(dependent:CoreConcept)
+    
+    // 모든 노드와 관계 수집
+    WITH target, 
+         collect(nodes(path_prereq)) + collect(nodes(path_dep)) AS node_lists,
+         collect(relationships(path_prereq)) + collect(relationships(path_dep)) AS rel_lists
+    
+    // 노드 리스트를 풀어서 유니크하게 만들기
+    UNWIND node_lists AS node_list
+    UNWIND node_list AS n
+    WITH target, collect(DISTINCT n) AS all_nodes, rel_lists
+    
+    // 관계 리스트를 풀어서 유니크하게 만들기
+    UNWIND rel_lists AS rel_list
+    UNWIND rel_list AS r
+    WITH all_nodes + target AS final_nodes_list, collect(DISTINCT r) AS final_rels
+    
+    // 최종 노드/엣지 포맷팅
+    WITH [n IN final_nodes_list | {id: n.name, label: n.name}] AS nodes,
+         [r IN final_rels | {source: startNode(r).name, target: endNode(r).name, label: '선수개념'}] AS edges
+         
+    RETURN nodes, edges
+    """
+    try:
+        results = graph.query(query, params={"concept": concept_name})
+        if results and results[0]["nodes"]:
+            log_debug(f"'{concept_name}'의 시각화 경로 조회 성공")
+            return {
+                "nodes": results[0]["nodes"],
+                "edges": results[0]["edges"]
+            }
+    except Exception as e:
+        print(f"⚠️ 시각화 경로 탐색 오류: {e}")
+    
+    return {"nodes": [], "edges": []}
 
 # 진단 질문 생성
 def generate_diagnostic_question(target_concept: str, prerequisites: list):
@@ -266,39 +316,90 @@ def generate_general_explanation(concept_name: str):
     log_debug(f"'{concept_name}'에 대한 일반 설명 생성 완료.")
     return explanation
 
-# 6-2. 문제 생성 함수 
-def generate_problem(concept_name: str):
-    """LLM을 사용하여 개념에 대한 간단한 연습 문제 생성 (스트림 반환)"""
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", f"""당신은 친절한 중학교 수학 선생님입니다.
-학생이 방금 '{concept_name}' 개념 학습을 마쳤습니다.
-학생이 풀어볼 수 있는 간단한 객관식 또는 단답형 문제 1개를 내주세요.
-        
-규칙:
-1. '{concept_name}' 개념을 직접적으로 활용하는 문제여야 합니다.
-2. 해설이나 정답은 절대 포함하지 마세요. 문제만 출제하세요.
-3. "좋아요! 그럼 이 문제 한번 풀어보실래요?" 같은 긍정적인 도입부를 사용하세요.
-4. 학생의 답변을 기다린다는 것을 명시하세요. (예: "답을 입력해주세요.")
-        
-예시:
-"좋아요! 그럼 이 문제 한번 풀어보실래요?
-        
-문제: 다음 중 x에 대한 일차방정식인 것을 모두 고르세요.
-(1) 2x + 5 = 7
-(2) x^2 - 1 = 0
-(3) y = 3x
-(4) 5 > 2
-(5) x(x-1) = 0
-
-답변을 입력해주세요."
-"""),
-        ("user", f"'{concept_name}'에 대한 문제를 1개 출제해주세요.")
-    ])
+# 6-2. 문제 생성 함수 (수정)
+def generate_problem(concept_name: str, explanation_count: int) -> dict:
+    """
+    LLM을 사용하여 개념에 대한 문제, 정답, 핵심 선수 개념을 생성합니다.
+    (수정) 학생에게 보낼 스트림과, 정답/핵심개념 데이터를 분리하여 딕셔너리로 반환합니다.
+    """
     
-    chain = prompt | llm | StrOutputParser()
-    problem = chain.stream({}) 
-    log_debug(f"'{concept_name}'에 대한 문제 생성 완료.")
-    return problem
+    # (신규) 문제/정답/핵심개념을 JSON으로 생성하는 체인
+    # (신규) 설명 횟수에 따라 프롬프트에 추가할 문맥 생성
+    if explanation_count > 0:
+        history_context = f"학생이 이 개념({concept_name})에 대한 문제를 이미 풀어본 적이 있습니다. **반드시 이전과 다른 새로운 문제**를 출제하세요."
+    else:
+        history_context = f"학생이 이 개념({concept_name})을 방금 학습했습니다."
+        
+    problem_gen_prompt = ChatPromptTemplate.from_messages([
+        ("system", f"""당신은 JSON 응답을 생성하는 수학 선생님입니다.
+{history_context}
+'{concept_name}' 개념을 활용하는 간단한 단답형 문제 1개를 만들어주세요.
+
+[규칙]
+1. 반드시 'problem', 'answer', 'key_concept'라는 영어 키(key) 3개를 모두 포함해야 합니다.
+2. 절대 응답을 ` ```json ... ``` ` (마크다운)으로 감싸지 마세요.
+3. "problem" 값에는 줄바꿈이 필요하면 반드시 \\n 문자를 사용하세요.
+4. **(수정) "key_concept"에는 이 문제를 푸는 데 필요한 '{concept_name}'의 *가장 중요한 선수 개념* 1가지를 적으세요.** (예: '이항', '밑면의 넓이', '피타고라스 정리'). 만약 마땅한 선수 개념이 없으면 "none"이라고 적으세요.
+
+[JSON 형식]
+{{{{
+  "problem": "...",
+  "answer": "...",
+  "key_concept": "..."
+}}}}
+
+[JSON 예시 1: 일차방정식 문제]
+{{{{
+  "problem": "... 2x + 3 = 11 ...",
+  "answer": "4",
+  "key_concept": "이항"
+}}}}
+
+[JSON 예시 2: 각뿔 부피 문제]
+{{{{
+  "problem": "... 각뿔의 부피는 얼마인가요?",
+  "answer": "120cm³",
+  "key_concept": "밑면의 넓이"
+}}}}
+"""),
+        # (수정) user 메시지는 간단하게
+        ("user", f"'{concept_name}'에 대한 문제를 JSON 형식으로 1개 출제해주세요.")
+    ])
+    chain = problem_gen_prompt | llm
+    
+    try:
+        # (수정) invoke 시 변수를 전달
+        response_content = chain.invoke({
+            "concept_name": concept_name,
+            "history_context": history_context
+        }).content
+        log_debug(f"문제 생성 JSON 응답: {response_content}")
+        
+        # (신규) LLM 응답이 JSON 형식이 아닐 수 있으므로 파싱 시도
+        data = json.loads(response_content)
+        
+        problem_text = data.get("problem", "오류: 문제를 생성하지 못했습니다.")
+        problem_answer = data.get("answer", "none")
+        problem_key_concept = data.get("key_concept", "none")
+        
+        # (신규) 학생에게 보낼 problem_text만 스트림으로 변환
+        problem_stream = iter([problem_text])
+        
+        return {
+            "problem_stream": problem_stream,
+            "problem_data": {
+                "answer": problem_answer,
+                "key_concept": problem_key_concept
+            }
+        }
+        
+    except Exception as e:
+        print(f"⚠️ 문제 생성 JSON 파싱 오류: {e}")
+        # (신규) 오류 발생 시 안전한 반환
+        return {
+            "problem_stream": iter(["죄송합니다, 문제 생성 중 오류가 발생했어요."]),
+            "problem_data": None
+        }
 
 # 6-3. 잡담 처리
 def handle_chitchat(user_input: str):
@@ -320,6 +421,46 @@ def handle_chitchat(user_input: str):
     log_debug("잡담 처리 완료.")
     return response
 
+# (handle_chitchat 함수 정의 다음)
+
+# === 6-3b. 문제 풀이 피드백 생성 (신규) ===
+def handle_solve_problem(user_answer: str, problem_data: dict):
+    """
+    학생의 답을 채점하고 '진단형 피드백'을 생성합니다. (스트림 반환)
+    """
+    answer = problem_data.get("answer", "none")
+    key_concept = problem_data.get("key_concept", "none")
+    
+    log_debug(f"채점 시작: 학생 답={user_answer}, 정답={answer}, 핵심개념={key_concept}")
+
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", f"""당신은 학생의 답을 채점하는 친절하고 격려하는 수학 선생님입니다.
+학생이 방금 수학 문제를 풀었습니다. 학생의 답이 정답과 일치하는지 판단하고, '진단형 피드백'을 제공하세요.
+
+[문제 정보]
+- 정답: "{answer}"
+- 핵심 개념: "{key_concept}" (이 문제를 푸는 데 필요했던 선수 개념)
+
+[피드백 규칙]
+1.  **정답일 경우 (학생의 답이 "{answer}"와 일치하거나, "x= {answer}" 등 의미상 같을 경우):**
+    - "정답입니다! 🥳"라고 칭찬해주세요.
+    - 이 문제를 푸는 데 사용된 **"{key_concept}"** 개념을 잘 활용했다고 1~2문장으로 격려해주세요.
+    - (예: "정답입니다! 🥳 '+3'을 넘기는 '{key_concept}' 개념을 정확히 사용하셨네요. 역시 개념을 아니까 문제가 풀리죠?")
+
+2.  **오답일 경우 (...):**
+    - **"아쉽네요, 정답은 '{answer}'였어요. 😅"**라고 **정답을 명확히 알려주세요.**
+    - 이 문제를 풀려면 **"{key_concept}"** 개념이 필요했다고 1~2문장으로 힌트를 주세요.
+    - "이 개념을 다시 공부해보는 것도 좋아요."라고 제안한 뒤, "더 궁금한 점이 있나요?"라고 물어보세요.
+    - (예: "아쉽네요, 정답은 '4'였어요. 😅 이 문제를 풀려면 '+3'을 반대편으로 넘기는 '{key_concept}' 개념이 필요했어요. 이 개념을 다시 공부해보는 것도 좋아요. 더 궁금한 점이 있나요?")
+    
+피드백은 2-4문장으로 간결하게, 스트림으로 반환하세요.
+"""),
+        ("user", f"학생의 답: {user_answer}")
+    ])
+    chain = prompt | llm | StrOutputParser()
+    return chain.stream({})
+
+
 # 6-4. master router 
 def call_master_router(user_input: str, current_state: dict) -> tuple[str, str]: # (수정) 반환 타입을 튜플로 명시
     """
@@ -328,6 +469,11 @@ def call_master_router(user_input: str, current_state: dict) -> tuple[str, str]:
     """
     # 튜터 흐름에 깊이 관여된 상태인지 확인
     mode = current_state.get("mode", "IDLE")
+    
+    if mode == "WAITING_PROBLEM_ANSWER":
+        log_debug("라우터: 문제 답변 대기 중이므로 'solve_problem'으로 강제 분류")
+        return "solve_problem", "none"
+    
     if mode in ["WAITING_DIAGNOSTIC", "WAITING_CONTINUATION"]:
         log_debug("라우터: 튜터 흐름(진단/연속)이 진행 중이므로 'tutor_flow'로 강제 분류")
         return "tutor_flow", "none" # (수정) 2개 값 반환
@@ -510,8 +656,10 @@ def intelligent_tutor(user_question: str, explained_concepts: set, explanation_c
     if not concept_info:
         print(f"ℹ️ '{concept}' 개념을 지식 그래프에서 찾을 수 없음 → LLM Fallback 시도\n")
         log_missing_concept(concept)
-        return {"fallback_needed": True, "concept": concept}
+        return {"fallback_needed": True, "concept": concept, "learning_path": {"nodes": [], "edges": []}}
 
+    path_data = get_path_for_visualization(concept)
+    
     # 3) 선수 개념 찾기 (그래프에 개념이 있는 경우)
     all_prerequisites = get_prerequisites(concept)
     
@@ -522,7 +670,8 @@ def intelligent_tutor(user_question: str, explained_concepts: set, explanation_c
         return {
             "concept": concept,
             "explanation_stream": explanation_stream,
-            "needs_diagnosis": False
+            "needs_diagnosis": False,
+            "learning_path": path_data
         }
 
 
@@ -536,7 +685,8 @@ def intelligent_tutor(user_question: str, explained_concepts: set, explanation_c
         return {
             "concept": concept, "concept_info": concept_info,
             "prerequisites": [], "needs_diagnosis": False,
-            "explanation_stream": explanation_stream
+            "explanation_stream": explanation_stream,
+            "learning_path": path_data
         }
 
     print(f"📋 확인 필요한 선수 개념: {[p['name'] for p in prereqs_to_check]}\n")
@@ -548,6 +698,7 @@ def intelligent_tutor(user_question: str, explained_concepts: set, explanation_c
         "prerequisites": prereqs_to_check,
         "needs_diagnosis": True,
         "diagnostic_question_stream": diagnostic_q_stream,
+        "learning_path": path_data
     }
 
 # 7-1. 진단 응답 처리 함수 (tutor_flow 전용)
@@ -663,6 +814,7 @@ def reset_conversation_flow(state: dict, keep_memory: bool = True):
     state["prerequisites"] = []
     state["primary_goal_concept"] = None
     state["pending_input"] = None 
+    state["learning_path"] = {"nodes": [], "edges": []} # <-- 이 줄 추가
 
     if not keep_memory:
         print("🧠 학습 기억도 초기화합니다.")
@@ -810,14 +962,17 @@ def handle_tutor_flow(user_input: str, new_state: dict) -> dict:
                  response_text = f"알겠습니다! 그럼 '{topic}'에 대해 먼저 알아볼까요?"
                  reset_conversation_flow(new_state)
                  new_state["pending_input"] = topic
-            else:
-                 log_debug("의도 불명확 - 초기화")
-                 response_text = "흠... 알겠습니다. 대화의 흐름을 잠시 놓쳤어요. 다시 질문해주시겠어요?"
-                 reset_conversation_flow(new_state)
-                 new_state["pending_input"] = user_input
+            else: 
+                 # (수정) 의도 불명확 시, 초기화 대신 재질문
+                 log_debug(f"의도 불명확({primary_intent}) - 재질문 시도")
+                 response_text = f"죄송해요, '{user_input}'(이)라고 하신 게 '네'라는 뜻인지 '아니오'라는 뜻인지 잘 모르겠어요. '{next_concept}' 개념을 설명해드릴까요?"
+                 
+                 # (수정) 현재 상태와 큐를 유지한 채, 질문 방식만 변경
+                 new_state["mode"] = "WAITING_CONTINUATION"
+                 new_state["last_tutor_question_type"] = "shall_i_explain" # 질문을 "설명해줄까요?"로 명확하게
            
             return {"response_prefix": response_prefix, "response_text": response_text, "response_stream": None, "new_state": new_state}
-        
+      
         #후속 처리
         if current_queue:
             next_concept_name = current_queue[0]
@@ -900,6 +1055,10 @@ def handle_tutor_flow(user_input: str, new_state: dict) -> dict:
             new_state["explained_concepts"],
             new_state["explanation_count"]
         )
+        
+        # learning_path가 있으면 new_state에 저장 (신규) 
+        if result.get("learning_path"):
+            new_state["learning_path"] = result["learning_path"]
 
         if result.get("error"):
             response_text = f"{result['error']}. 다른 질문이 있을까요?"
@@ -942,18 +1101,23 @@ def handle_tutor_flow(user_input: str, new_state: dict) -> dict:
 # 10. 마스터 함수: process_turn (교통 정리 담당)
 def get_initial_state() -> dict:
     """Streamlit 세션 초기화를 위한 기본 상태값을 반환합니다."""
-    return {
+    
+    # (수정) JSON 파일에서 프로필을 로드합니다.
+    profile_data = load_profile()
+    
+    # (수정) 세션 상태 기본값을 추가합니다.
+    initial_state = {
         "mode": "IDLE",
         "primary_goal_concept": None,
         "target_concept_info": None,
         "prerequisites": [],
         "queue": [],
         "unmentioned_concepts": [],
-        "explained_concepts": set(),
         "last_tutor_question_type": None,
         "last_explained_concept": None,
-        "explanation_count": {}
+        **profile_data  # (수정) 로드된 'explained_concepts'와 'explanation_count'를 병합
     }
+    return initial_state
 
 def process_turn(user_input: str, current_state: dict) -> dict:
     """
@@ -1009,7 +1173,7 @@ def process_turn(user_input: str, current_state: dict) -> dict:
         # 4) 작업 분배 (라우팅)
         if task == "greeting":
             response_stream = iter(["안녕하세요! 🤖 수학 개념에 대해 질문해주시면 자세히 설명해 드릴게요."])
-             
+        
         elif task == "ask_problem":
             concept_for_problem = None
             if topic != "none":
@@ -1022,8 +1186,21 @@ def process_turn(user_input: str, current_state: dict) -> dict:
                     concept_for_problem = last_concept
             
             if concept_for_problem:
-                response_stream = generate_problem(concept_for_problem)
-                new_state["mode"] = "POST_EXPLANATION" 
+                # (신규) 이 개념에 대한 설명/문제풀이 횟수를 가져옴
+                count = new_state.get("explanation_count", {}).get(concept_for_problem, 0)
+                
+                # (수정) generate_problem 호출 시 count 전달
+                problem_result = generate_problem(concept_for_problem, count)
+                response_stream = problem_result["problem_stream"]
+                
+                if problem_result["problem_data"]:
+                    # (수정) 새 상태와 정답 데이터를 new_state에 저장
+                    new_state["mode"] = "WAITING_PROBLEM_ANSWER" # (중요) 새 모드 설정
+                    new_state["current_problem"] = problem_result["problem_data"]
+                    log_debug(f"새 문제 상태 저장: {new_state['current_problem']}")
+                else:
+                    # 문제 생성 실패 시
+                    new_state["mode"] = "POST_EXPLANATION" 
             else:
                 log_debug("문제 생성 요청 실패: 주제 및 마지막 개념 없음")
                 response_text = "먼저 학습할 개념을 알려주세요! 어떤 개념에 대한 문제를 내드릴까요?"
@@ -1032,16 +1209,23 @@ def process_turn(user_input: str, current_state: dict) -> dict:
         elif task == "chitchat":
             log_debug("잡담 처리 요청")
             response_stream = handle_chitchat(user_input)
-
-        elif task == "chitchat":
-            log_debug("잡담 처리 요청")
-            response_stream = handle_chitchat(user_input)
         
         elif task == "solve_problem":
             log_debug("문제 풀이 답변 처리 요청")
-            # 일단 임시방편으로. 문제 풀이 없애던지 답변 로직 구축 필요함
-            response_text = "답변해주셨네요! 😊 아쉽지만 지금은 정답을 확인하는 기능은 없어요. 다른 개념을 질문해 주시겠어요?"
-            new_state["mode"] = "POST_EXPLANATION" 
+            
+            # (수정) new_state에서 현재 문제 정보 가져오기
+            problem_data = new_state.get("current_problem")
+            
+            if problem_data:
+                # (수정) 새 핸들러를 호출하여 피드백 스트림 생성
+                response_stream = handle_solve_problem(user_input, problem_data)
+                new_state["mode"] = "POST_EXPLANATION" # 채점 후 다시 일반 대기 모드
+                new_state["current_problem"] = None # (중요) 풀이가 끝났으므로 문제 데이터 비우기
+            else:
+                # 비정상적인 상황 (버그)
+                log_debug("오류: WAITING_PROBLEM_ANSWER 상태였으나 current_problem 데이터가 없음")
+                response_text = "어떤 문제에 대한 답인지 잘 모르겠어요. 다시 질문해주시겠어요?"
+                new_state["mode"] = "IDLE"
             
         elif task == "tutor_flow":
             log_debug("핵심 튜터 흐름(tutor_flow) 핸들러 호출")
@@ -1110,6 +1294,8 @@ def process_turn(user_input: str, current_state: dict) -> dict:
             
     # 6. 최종 반환 (app.py가 기대하는 형식)
         
+    save_profile(new_state)
+    
     if "explained_concepts" in new_state:
         new_state["explained_concepts"] = list(new_state["explained_concepts"])
              

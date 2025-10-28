@@ -4,6 +4,7 @@ import sys
 import os
 import re
 import json
+from streamlit_agraph import agraph, Node, Edge, Config
 from langchain_neo4j import Neo4jGraph
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
@@ -36,20 +37,29 @@ st.set_page_config(
 # 사이드바
 with st.sidebar:
     st.title("📊 나의 학습 현황")
-    
+
+    # 세션 상태 초기화 (get_initial_state 호출 시 프로필 로드됨)
     if "conversation_state" not in st.session_state:
         st.session_state.conversation_state = get_initial_state()
 
     current_state = st.session_state.conversation_state
-    mastered_concepts_set = current_state.get("explained_concepts", set())
+    
+    # JSON에서 list로 로드된 explained_concepts
+    mastered_concepts_list = current_state.get("explained_concepts", []) 
     explanation_counts = current_state.get("explanation_count", {})
-    
-    st.metric("🎓 학습 완료 개념", f"{len(mastered_concepts_set)} 개")
-    
-    weak_concepts_list = [name for name, count in explanation_counts.items() if count >= 2]
+
+    # (수정) list의 길이로 학습 완료 개수 표시
+    st.metric("🎓 학습 완료 개념", f"{len(mastered_concepts_list)} 개")
+
+    # 설명 횟수가 2번 이상인 개념을 취약 개념으로 간주
+    weak_concepts_list = [
+        name for name, count in explanation_counts.items() 
+        if count >= 2 and name in mastered_concepts_list
+    ]
     
     st.subheader("🎯 복습 추천 개념")
     if weak_concepts_list:
+        # (수정) 설명 횟수도 함께 표시
         for concept in weak_concepts_list:
             st.warning(f"- {concept} (설명 {explanation_counts.get(concept, 0)}회)")
     else:
@@ -58,7 +68,15 @@ with st.sidebar:
     st.divider()
     
     if st.button("🔄 학습 기록 초기화"):
-        st.session_state.conversation_state = get_initial_state()
+        try:
+            profile_path = os.path.join("data", "user_profile.json")
+            if os.path.exists(profile_path):
+                os.remove(profile_path)
+                st.toast("프로필 파일이 삭제되었습니다.")
+        except Exception as e:
+            st.error(f"프로필 파일 삭제 중 오류: {e}")
+            
+        st.session_state.conversation_state = get_initial_state() # 새 프로필 로드 (빈 상태)
         st.session_state.messages = [{"role": "assistant", "content": "안녕하세요! 학습 기록이 초기화되었습니다."}]
         st.rerun()
 
@@ -73,7 +91,7 @@ if "messages" not in st.session_state:
     st.session_state.messages = [{"role": "assistant", "content": "안녕하세요! 수학 개념에 대해 무엇이든 물어보세요."}]
 
 
-# 2. (핵심) 이전 대화 기록을 먼저 모두 표시
+# 2. 이전 대화 기록을 먼저 모두 표시
 for message in st.session_state.messages:
     avatar = "🧑‍🎓" if message["role"] == "user" else "🤖"
     with st.chat_message(message["role"], avatar=avatar):
@@ -145,8 +163,67 @@ if pending_input or user_input:
     # 6. rerun 
     st.rerun()
 
+
+#학습경로 시각화
+
 st.divider()
 st.subheader("📍 학습 경로")
-path_container = st.container()
+path_container = st.container(height=300) 
+
 with path_container:
-    st.info("개념을 질문하면 여기에 학습 경로가 표시됩니다.")
+    # 세션 상태에서 시각화 데이터 가져오기
+    current_state = st.session_state.conversation_state
+    path_data = current_state.get("learning_path")
+    # (수정) set이 아닌 list/tuple인지 확인 (JSON에서 로드된 상태)
+    learned_concepts_iterable = current_state.get("explained_concepts", [])
+    learned_concepts = set(learned_concepts_iterable) # set으로 변환
+    current_goal = current_state.get("primary_goal_concept")
+
+    if path_data and path_data.get("nodes"):
+        nodes = []
+        edges = []
+        
+        node_ids = set() # 중복 노드 방지
+        
+        # 1. 노드 객체 생성 및 스타일 적용
+        for n in path_data.get("nodes", []):
+            node_id = n.get("id")
+            if node_id not in node_ids:
+                node_ids.add(node_id)
+                
+                # 학습 상태에 따라 노드 색상 변경
+                if node_id == current_goal:
+                    color = "#FFD700" # 노란색 (현재 목표)
+                    size = 20
+                elif node_id in learned_concepts:
+                    color = "#90EE90" # 연두색 (학습 완료)
+                    size = 15
+                else:
+                    color = "#D3D3D3" # 회색 (미학습)
+                    size = 15
+                    
+                nodes.append(Node(id=node_id, 
+                                  label=n.get("label", node_id), 
+                                  color=color,
+                                  size=size))
+
+        # 2. 엣지 객체 생성
+        for e in path_data.get("edges", []):
+            edges.append(Edge(source=e.get("source"), 
+                              target=e.get("target"),
+                              label=e.get("label", ""),
+                              color="#D3D3D3")) # 엣지 색상
+
+        # 3. 그래프 설정 (물리 엔진 비활성화)
+        config = Config(width="100%",
+                        height=280,
+                        directed=True, 
+                        physics=False, # (중요) 물리 효과 끄기
+                        hierarchical=True, # (중요) 계층 구조로 표시
+                        layout={"hierarchical": {"direction": "LR"}}, # 좌->우 방향
+                        )
+
+        agraph(nodes=nodes, edges=edges, config=config)
+
+    else:
+        st.info("개념을 질문하면 여기에 학습 경로가 표시됩니다.")

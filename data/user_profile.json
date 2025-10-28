@@ -1,0 +1,36 @@
+{
+    "explained_concepts": [],
+    "explanation_count": {},
+    "learning_path": {
+        "nodes": [
+            {
+                "id": "각뿔",
+                "label": "각뿔"
+            },
+            {
+                "id": "각뿔대",
+                "label": "각뿔대"
+            },
+            {
+                "id": "다면체",
+                "label": "다면체"
+            },
+            {
+                "id": "각뿔대",
+                "label": "각뿔대"
+            }
+        ],
+        "edges": [
+            {
+                "source": "각뿔",
+                "target": "각뿔대",
+                "label": "선수개념"
+            },
+            {
+                "source": "다면체",
+                "target": "각뿔",
+                "label": "선수개념"
+            }
+        ]
+    }
+}
