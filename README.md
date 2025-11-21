@@ -201,24 +201,6 @@ print(result["response_text"])
 
 ---
 
-## 🔧 커스터마이징
-
-### 선수 관계 추가
-`scripts/04_create_prerequisite_links.py`의 `PREREQUISITE_RULES` 딕셔너리 수정:
-```python
-PREREQUISITE_RULES = {
-    "새개념": ["선수개념1", "선수개념2"],
-    # ...
-}
-```
-
-### LLM 모델 변경
-`.env` 파일에서 모델 지정 또는 `tutor_rag_06.py`에서 직접 수정:
-```python
-llm = ChatOpenAI(model='gpt-4o', temperature=0.3)
-```
-
----
 
 ## 🐛 프로젝트 한계 
 
