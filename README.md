@@ -145,30 +145,6 @@ streamlit run app.py
 
 ---
 
-## 📁 프로젝트 구조
-
-```
-MATH-TUTOR-RAG/
-├── data/                      # 데이터 디렉토리
-│   ├── processed_data.jsonl   # 전처리된 학습 데이터
-│   └── user_profile.json      # 학생 학습 이력
-├── scripts/                   # 파이프라인 스크립트
-│   ├── 01_preprocessing_data.py       # 데이터 전처리
-│   ├── 02_build_graph.py              # 그래프 초기 구축
-│   ├── 03_extract_and_merge_concepts.py  # 핵심 개념 추출
-│   ├── 04_create_prerequisite_links.py   # 선수 관계 생성
-│   ├── 05_rag_test.py                 # RAG 테스트 (GraphCypherQAChain)
-│   └── 06_tutor_rag.py                # 튜터 핵심 로직
-├── utils/                     # 유틸리티 함수
-│   └── student_profile.py     # 프로필 관리
-├── chroma_db/                 # (미사용) 벡터 DB 디렉토리
-├── app.py                     # Streamlit 메인 앱
-├── .env                       # 환경 변수 (git ignored)
-├── .gitignore
-└── README.md
-```
-
----
 
 ## 🔑 핵심 모듈 설명
 
@@ -221,38 +197,6 @@ from scripts.tutor_rag_06 import process_turn, get_initial_state
 state = get_initial_state()
 result = process_turn("일차방정식이 뭐야?", state)
 print(result["response_text"])
-```
-
----
-
-## 🎓 사용 예시
-
-### 1. 기본 개념 학습
-```
-학생: "소인수분해가 뭐야?"
-튜터: [소인수분해 설명]
-      "더 궁금한 것이 있나요?"
-```
-
-### 2. 선수 지식 진단
-```
-학생: "최대공약수 구하는 법 알려줘"
-튜터: "좋은 질문이에요! 최대공약수를 제대로 이해하려면 '소인수분해' 개념부터 
-      확인해보면 좋은데, 혹시 이 개념은 기억나시나요?"
-```
-
-### 3. 문제 풀이
-```
-학생: "일차방정식 문제 내줘"
-튜터: [문제 출제]
-학생: "x=4"
-튜터: "정답입니다! 🥳 '+3'을 넘기는 '이항' 개념을 정확히 사용하셨네요."
-```
-
-### 4. 재설명 요청
-```
-학생: "아직 이해 안 돼"
-튜터: [다른 방식으로 재설명]
 ```
 
 ---
